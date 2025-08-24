@@ -1,3 +1,9 @@
+
+
+import 'react-native-get-random-values'; // Needed for some UUID generation logic
+import { Buffer } from 'buffer';
+global.Buffer = Buffer;
+
 /**
  * @format
  */
