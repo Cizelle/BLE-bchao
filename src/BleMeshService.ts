@@ -1,7 +1,7 @@
 import { PermissionsAndroid, Platform, NativeModules, DeviceEventEmitter } from 'react-native';
 
-import BleManager, { Peripheral } from 'react-native-ble-manager';
-import type { BleDidUpdateStateEvent, StartPeripheralOptions } from 'react-native-ble-manager/src/types'; // Correct type import path
+import BleManager from 'react-native-ble-manager';
+import type { BleManagerDidUpdateStateEvent } from 'react-native-ble-manager/src/types'; // Correct type import path
 
 import { Buffer } from 'buffer';
 import { victimStorageManager, VictimData } from './VictimStorageManager';
@@ -47,7 +47,7 @@ class BleMeshService {
         return true;
     }
 
-    setupStateListener(onStateChange: (state: BleDidUpdateStateEvent) => void) {
+    setupStateListener(onStateChange: (state: BleManagerDidUpdateStateEvent) => void) {
         return DeviceEventEmitter.addListener('BleManagerDidUpdateState', onStateChange);
     }
 
@@ -94,7 +94,9 @@ class BleMeshService {
     
     stopGossipMesh() {
         if (this.isScanning) BleManager.stopScan();
-        if (this.isAdvertising) BleManager.stopPeripheral();
+        if (this.isAdvertising) {
+            BleManagerModule.stopPeripheral();
+        }
         // TODO: clear the interval
     }
 
@@ -166,15 +168,19 @@ class BleMeshService {
     
    // Place this inside the BleMeshService class
 
+// Place this inside the BleMeshService class
+
 private async connectAndRead(peripheralId: string) {
     try {
         await BleManager.connect(peripheralId);
         console.log(`Connected to peripheral: ${peripheralId}`);
 
+        // 1. Retrieve all services and characteristics
         const servicesAndCharacteristics = await BleManager.retrieveServices(peripheralId);
 
-        // Access the services from the correct property and find our service
-        const service = servicesAndCharacteristics.services.find(
+        // 2. Find our specific Service object
+        // Use services.find() on the `services` array (s: any to avoid TS error)
+        const service = servicesAndCharacteristics.services && servicesAndCharacteristics.services.find(
             (s: any) => s.uuid.toUpperCase() === SERVICES_UUID.toUpperCase()
         );
 
@@ -183,9 +189,9 @@ private async connectAndRead(peripheralId: string) {
             return;
         }
 
-        // Access the characteristics from the correct property and find our characteristic
-        const characteristic = service.characteristics.find(
-            (c: any) => c.uuid.toUpperCase() === VICTIM_CHARACTERISTIC_UUID.toUpperCase()
+        // 3. Find the Characteristic object within the characteristics array
+        const characteristic = servicesAndCharacteristics.characteristics && servicesAndCharacteristics.characteristics.find(
+            (c: any) => c.service.toUpperCase() === SERVICES_UUID.toUpperCase() && c.uuid.toUpperCase() === VICTIM_CHARACTERISTIC_UUID.toUpperCase()
         );
 
         if (!characteristic) {
@@ -193,12 +199,14 @@ private async connectAndRead(peripheralId: string) {
             return;
         }
 
+        // 4. Read the Characteristic
         const readData = await BleManager.read(
             peripheralId,
             SERVICES_UUID,
             VICTIM_CHARACTERISTIC_UUID
         );
 
+        // ... (rest of the function is correct)
         const victimDataString = Buffer.from(readData).toString('utf8');
         const victims: VictimData[] = JSON.parse(victimDataString);
 

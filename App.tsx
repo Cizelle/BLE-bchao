@@ -1,5 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { SafeAreaView, StatusBar, StyleSheet, Text, View, Button, PermissionsAndroid, Platform } from 'react-native';
+import {
+  SafeAreaView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+  Button,
+  PermissionsAndroid,
+  Platform,
+  Alert,
+  Linking,
+} from 'react-native';
 import BackgroundService from 'react-native-background-actions';
 import { bleMeshService } from './src/BleMeshService';
 import { victimStorageManager, VictimData } from './src/VictimStorageManager';
@@ -33,35 +44,75 @@ const App = () => {
   const [bleStatus, setBleStatus] = useState('Initializing...');
   const [currentLocation, setCurrentLocation] = useState(INITIAL_LOCATION);
 
-  const requestLocationPermission = async (): Promise<boolean> => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-          {
-            title: "Location Permission",
-            message: "This app needs access to your location for the mesh network.",
-            buttonNeutral: "Ask Me Later",
-            buttonNegative: "Cancel",
-            buttonPositive: "OK"
-          }
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      } catch (err) {
-        console.warn(err);
-        return false;
+  /**
+   * requestAppPermissions
+   * - requests ACCESS_FINE_LOCATION
+   * - requests BLUETOOTH_SCAN, BLUETOOTH_CONNECT, BLUETOOTH_ADVERTISE if available
+   * - robust to different Android / RN versions by checking permission constants
+   */
+  const requestAppPermissions = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+
+    try {
+      const P = PermissionsAndroid.PERMISSIONS;
+      const permissionsToRequest: string[] = [];
+
+      // Always ask location (needed on older Android for BLE scanning)
+      if (P.ACCESS_FINE_LOCATION) permissionsToRequest.push(P.ACCESS_FINE_LOCATION);
+
+      // Android 12+ runtime BLE permissions (request only if constant exists)
+      if (P.BLUETOOTH_SCAN) permissionsToRequest.push(P.BLUETOOTH_SCAN);
+      if (P.BLUETOOTH_CONNECT) permissionsToRequest.push(P.BLUETOOTH_CONNECT);
+      if (P.BLUETOOTH_ADVERTISE) permissionsToRequest.push(P.BLUETOOTH_ADVERTISE);
+
+      // If nothing to request (older RN/platform), treat as granted
+      if (permissionsToRequest.length === 0) return true;
+
+      const granted = await PermissionsAndroid.requestMultiple(permissionsToRequest);
+
+      // Check every requested permission was granted
+      let allGranted = true;
+      for (const perm of permissionsToRequest) {
+        if (granted[perm] !== PermissionsAndroid.RESULTS.GRANTED) {
+          allGranted = false;
+          break;
+        }
       }
+
+      if (!allGranted) {
+        console.warn('Permissions denied:', granted);
+        // Suggest the user open settings to grant if they blocked permanently
+        Alert.alert(
+          'Permissions required',
+          'Bluetooth and/or Location permission(s) were denied. The app needs them to function. You can open Settings to enable them.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() },
+          ],
+          { cancelable: true }
+        );
+      }
+
+      return allGranted;
+    } catch (err) {
+      console.warn('Permission request error', err);
+      return false;
     }
-    return true; // iOS handles location permissions automatically
   };
 
+  /**
+   * startLocationTracking
+   * checks permissions and starts Geolocation.watchPosition
+   */
   const startLocationTracking = async () => {
-    const hasPermission = await requestLocationPermission();
+    const hasPermission = await requestAppPermissions();
     if (!hasPermission) {
-      console.log('Location permission denied.');
+      console.log('Permissions denied: location/ble not available.');
+      setBleStatus('Permissions denied. Cannot start location tracking.');
       return;
     }
 
+    // Start tracking (returns watchId but we keep simple)
     Geolocation.watchPosition(
       (position: any) => {
         setCurrentLocation({
@@ -70,41 +121,57 @@ const App = () => {
         });
       },
       (error) => {
-        console.log(error);
+        console.log('Geolocation watch error:', error);
       },
-      { enableHighAccuracy: true, distanceFilter: 10 }
+      { enableHighAccuracy: true, distanceFilter: 10, interval: 5000, fastestInterval: 2000 }
     );
   };
 
+  /**
+   * handleRoleSelect
+   * - unified permission check
+   * - starts background or foreground BLE behavior
+   */
   const handleRoleSelect = async (newRole: 'victim' | 'rescuer') => {
-    // 1. Request BLE Permissions
-    const isPermissionGranted = await bleMeshService.requestPermissions();
+    setBleStatus('Requesting permissions...');
+    const isPermissionGranted = await requestAppPermissions();
     if (!isPermissionGranted) {
-      setBleStatus('Bluetooth permissions DENIED');
+      setBleStatus('Bluetooth/Location permissions DENIED');
       return;
     }
 
-    // 2. Stop any existing mesh activity and set the role
+    // Stop previous mesh if any
     bleMeshService.stopGossipMesh();
     setRole(newRole);
 
-    // 3. Start the appropriate service
     if (newRole === 'victim') {
-      // Start background service for victims
-      if (!BackgroundService.isRunning()) {
-        await BackgroundService.start(backgroundBleTask, taskOptions);
+      // Victim: background advertising/relaying
+      try {
+        if (!BackgroundService.isRunning()) {
+          await BackgroundService.start(backgroundBleTask, taskOptions);
+        }
         await startLocationTracking();
         setBleStatus('Running: Advertising and Relaying Victim Data (Background Mode)...');
+      } catch (err) {
+        console.warn('Failed to start background service:', err);
+        setBleStatus('Failed to start background service');
       }
     } else {
-      // For rescuers, run in foreground
+      // Rescuer: foreground scanning/relaying
       await startLocationTracking();
-      await bleMeshService.startGossipMesh(null);
-      setBleStatus('Running: Scanning and Relaying Victim Data (Foreground Mode)...');
+      try {
+        await bleMeshService.startGossipMesh(null);
+        setBleStatus('Running: Scanning and Relaying Victim Data (Foreground Mode)...');
+      } catch (err) {
+        console.warn('Failed to start gossip mesh:', err);
+        setBleStatus('Failed to start gossip mesh');
+      }
     }
   };
 
-  // Main Effect Hook for UI updates and cleanup
+  /**
+   * Main Effect Hook for UI updates and cleanup
+   */
   useEffect(() => {
     const refreshVictims = async () => {
       const victims = await victimStorageManager.getAllVictims();
@@ -124,25 +191,35 @@ const App = () => {
     return () => {
       // Cleanup on component unmount
       bleMeshService.stopGossipMesh();
-      stateSubscription.remove();
+      // remove may be undefined depending on lib — guard defensively
+      try {
+        stateSubscription?.remove?.();
+      } catch {}
       clearInterval(intervalId);
-      BackgroundService.stop(); // Stop the background service on app close
+      try {
+        BackgroundService.stop();
+      } catch {}
     };
   }, []);
 
-  // Update the UI when the location or role changes
-useEffect(() => {
-  if (role === 'victim') {
-    const myVictimData: VictimData = {
-      deviceId: MY_DEVICE_ID,
-      role: 'victim',
-      gpsLocation: currentLocation,
-      timestamp: Date.now(),
-    };
-    victimStorageManager.storeVictim(myVictimData);
-  }
-}, [currentLocation, role]);
+  /**
+   * Store victim data when role= victim and location updates
+   */
+  useEffect(() => {
+    if (role === 'victim') {
+      const myVictimData: VictimData = {
+        deviceId: MY_DEVICE_ID,
+        role: 'victim',
+        gpsLocation: currentLocation,
+        timestamp: Date.now(),
+      };
+      victimStorageManager.storeVictim(myVictimData);
+    }
+  }, [currentLocation, role]);
 
+  /**
+   * UI renderers
+   */
   const renderHome = () => (
     <View style={styles.homeContainer}>
       <Text style={styles.title}>BLE Mesh App</Text>
@@ -178,15 +255,29 @@ useEffect(() => {
             <View key={v.deviceId} style={styles.victimCard}>
               <Text style={styles.cardText}>ID: {v.deviceId}</Text>
               <Text style={styles.cardText}>Role: {v.role}</Text>
-              <Text style={styles.cardText}>Loc: Lat {v.gpsLocation.latitude.toFixed(4)}, Lon {v.gpsLocation.longitude.toFixed(4)}</Text>
+              <Text style={styles.cardText}>
+                Loc: Lat {v.gpsLocation.latitude.toFixed(4)}, Lon {v.gpsLocation.longitude.toFixed(4)}
+              </Text>
               <Text style={styles.cardText}>Last Seen: {new Date(v.timestamp).toLocaleTimeString()}</Text>
             </View>
           ))
         )}
       </View>
-      
+
       <View style={styles.buttonContainer}>
-          <Button title="Go Back / Stop Mesh" onPress={() => setRole('none')} color="#888" />
+        <Button
+          title="Go Back / Stop Mesh"
+          onPress={() => {
+            // Stop background & mesh when going back
+            try {
+              BackgroundService.stop();
+            } catch {}
+            bleMeshService.stopGossipMesh();
+            setRole('none');
+            setBleStatus('Stopped.');
+          }}
+          color="#888"
+        />
       </View>
     </View>
   );

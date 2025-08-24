@@ -1,6 +1,6 @@
 import { PermissionsAndroid } from 'react-native';
-import { bleMeshService, MY_SERVICE_UUID } from './BleMeshService';
-import { victimStorageManager, VictimData } from './VictimStorageManager';
+import { bleMeshService} from './BleMeshService';
+import { VictimData } from './VictimStorageManager';
 import Geolocation from 'react-native-geolocation-service';
 import BackgroundService from 'react-native-background-actions';
 
@@ -36,12 +36,11 @@ export const backgroundBleTask = async (taskDataArguments: any) => {
   );
 
   // Main background loop
-  await new Promise(async (resolve) => {
+  await new Promise(async () => {
     for (let i = 0; BackgroundService.isRunning(); i++) {
       console.log('Background task running...', i);
 
       // Get the latest victim data from storage
-      const storedVictims = await victimStorageManager.getAllVictims();
       const victimDataToAdvertise: VictimData = {
           deviceId: MY_DEVICE_ID,
           role: "victim", // The app is designed to be a victim in the background
